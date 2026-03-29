@@ -39,6 +39,8 @@ struct Args {
     output_root: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     persist: bool,
+    #[arg(long, default_value_t = false)]
+    flat: bool,
     #[arg(long = "artifact-mode", value_enum)]
     artifact_mode: Option<ArtifactMode>,
     #[arg(long, value_enum, default_value_t = ProductDisplayMode::Summary)]
@@ -57,6 +59,15 @@ pub fn run() -> Result<()> {
         args.run_id.as_deref(),
         dataset.exclude_submission_when_day_filtered,
     )?;
+    let flat_layout = args.flat && plans.len() > 1;
+    let flat_dir = if flat_layout {
+        Some(output_root.join(&run_id_seed))
+    } else {
+        None
+    };
+    if let Some(flat_dir) = &flat_dir {
+        reset_flat_output_dir(flat_dir)?;
+    }
     let mut rows = Vec::with_capacity(plans.len());
     let mut outputs = Vec::with_capacity(plans.len());
     let matching = MatchingConfig {
@@ -84,6 +95,23 @@ pub fn run() -> Result<()> {
             metadata_overrides: Default::default(),
         })?;
 
+        let run_dir_label = if let Some(flat_dir) = &flat_dir {
+            write_flat_run_artifacts(flat_dir, &plan.artifact_prefix, &output)?;
+            fs::remove_dir_all(&output.run_dir).with_context(|| {
+                format!(
+                    "failed to remove temporary child run directory {}",
+                    output.run_dir.display()
+                )
+            })?;
+            format!(
+                "{}/{}-*",
+                display_path(flat_dir),
+                plan.artifact_prefix
+            )
+        } else {
+            display_path(&output.run_dir)
+        };
+
         rows.push(SummaryRow {
             dataset: short_dataset_label(&plan.dataset_file),
             day: output.metrics.day,
@@ -91,12 +119,15 @@ pub fn run() -> Result<()> {
             own_trade_count: output.metrics.own_trade_count,
             final_pnl_total: output.metrics.final_pnl_total,
             final_pnl_by_product: output.metrics.final_pnl_by_product.clone(),
-            run_dir: Some(display_path(&output.run_dir)),
+            run_dir: Some(run_dir_label),
         });
         outputs.push(output);
     }
 
-    let bundle_dir = if persist && outputs.len() > 1 {
+    let bundle_dir = if let Some(flat_dir) = &flat_dir {
+        write_flat_bundle(flat_dir, &trader, &dataset, &rows, &outputs)?;
+        Some(display_path(flat_dir))
+    } else if persist && outputs.len() > 1 {
         Some(write_combined_bundle(
             &output_root,
             &run_id_seed,
@@ -116,6 +147,7 @@ pub fn run() -> Result<()> {
         artifact_mode,
         args.products,
         bundle_dir.as_deref(),
+        flat_layout,
     );
     Ok(())
 }
@@ -125,6 +157,7 @@ struct PlannedRun {
     dataset_file: PathBuf,
     day: Option<i64>,
     run_id: String,
+    artifact_prefix: String,
 }
 
 #[derive(Debug, Clone)]
@@ -260,14 +293,18 @@ fn build_run_plan(
 
     let plans = targets
         .into_iter()
-        .map(|(dataset_file, day)| PlannedRun {
-            run_id: if multiple_runs {
-                format!("{run_id_seed}-{}", run_suffix(&dataset_file, day))
-            } else {
-                run_id_seed.clone()
-            },
-            dataset_file,
-            day,
+        .map(|(dataset_file, day)| {
+            let artifact_prefix = run_suffix(&dataset_file, day);
+            PlannedRun {
+                run_id: if multiple_runs {
+                    format!("{run_id_seed}-{artifact_prefix}")
+                } else {
+                    run_id_seed.clone()
+                },
+                dataset_file,
+                day,
+                artifact_prefix,
+            }
         })
         .collect();
 
@@ -527,6 +564,18 @@ fn default_run_id_seed() -> String {
 }
 
 fn run_suffix(dataset_file: &Path, day: Option<i64>) -> String {
+    if let Some(container) = dataset_container_label(dataset_file) {
+        let base = if is_submission_like_path(dataset_file) {
+            format!("{container}-submission")
+        } else {
+            container
+        };
+        let day_label = day
+            .map(|value| format!("day-{value}"))
+            .unwrap_or_else(|| "all".to_string());
+        return sanitize_identifier(&format!("{base}-{day_label}"));
+    }
+
     let stem = dataset_stem_label(dataset_file);
     let day_label = day
         .map(|value| format!("day-{value}"))
@@ -732,6 +781,14 @@ fn dataset_stem_label(path: &Path) -> String {
         .to_string()
 }
 
+fn dataset_container_label(path: &Path) -> Option<String> {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+        .filter(|value| !value.is_empty() && value != ".")
+}
+
 fn day_key_from_path(path: &Path) -> Option<String> {
     day_key_from_name(path.file_name()?.to_str()?)
 }
@@ -855,6 +912,7 @@ fn print_summary(
     artifact_mode: ArtifactMode,
     products: ProductDisplayMode,
     bundle_dir: Option<&str>,
+    flat_layout: bool,
 ) {
     println!(
         "trader: {}{}",
@@ -881,7 +939,13 @@ fn print_summary(
         }
     );
     if let Some(bundle_dir) = bundle_dir {
-        println!("bundle: {bundle_dir}");
+        if flat_layout {
+            println!("bundle: {bundle_dir} [flat multi-run output]");
+        } else {
+            println!(
+                "bundle: {bundle_dir} [manifest+combined logs only; use each RUN_DIR/submission.log for visualization]"
+            );
+        }
     }
     println!(
         "{:<12} {:>6} {:>8} {:>11} {:>12}  RUN_DIR",
@@ -904,6 +968,85 @@ fn print_summary(
 fn render_day(day: Option<i64>) -> String {
     day.map(|value| value.to_string())
         .unwrap_or_else(|| "all".to_string())
+}
+
+fn reset_flat_output_dir(flat_dir: &Path) -> Result<()> {
+    if flat_dir.is_dir() {
+        fs::remove_dir_all(flat_dir)
+            .with_context(|| format!("failed to replace flat output directory {}", flat_dir.display()))?;
+    }
+    fs::create_dir_all(flat_dir)
+        .with_context(|| format!("failed to create flat output directory {}", flat_dir.display()))?;
+    Ok(())
+}
+
+fn write_flat_run_artifacts(flat_dir: &Path, prefix: &str, output: &crate::model::RunOutput) -> Result<()> {
+    let artifacts = output
+        .artifacts
+        .as_ref()
+        .context("flat output requires materialized artifacts")?;
+
+    write_prefixed_artifact(flat_dir, prefix, "metrics.json", &artifacts.metrics_json)?;
+    write_prefixed_artifact(flat_dir, prefix, "bundle.json", &artifacts.bundle_json)?;
+    write_prefixed_artifact(flat_dir, prefix, "submission.log", &artifacts.submission_log)?;
+    write_prefixed_artifact(flat_dir, prefix, "activity.csv", &artifacts.activity_csv)?;
+    write_prefixed_artifact(
+        flat_dir,
+        prefix,
+        "pnl_by_product.csv",
+        &artifacts.pnl_by_product_csv,
+    )?;
+    write_prefixed_artifact(flat_dir, prefix, "combined.log", &artifacts.combined_log)?;
+    write_prefixed_artifact(flat_dir, prefix, "trades.csv", &artifacts.trades_csv)?;
+    Ok(())
+}
+
+fn write_prefixed_artifact(flat_dir: &Path, prefix: &str, file_name: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    fs::write(flat_dir.join(format!("{prefix}-{file_name}")), bytes).with_context(|| {
+        format!(
+            "failed to write flat artifact {} in {}",
+            file_name,
+            flat_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn write_flat_bundle(
+    flat_dir: &Path,
+    trader: &ResolvedTrader,
+    dataset: &ResolvedDataset,
+    rows: &[SummaryRow],
+    outputs: &[crate::model::RunOutput],
+) -> Result<()> {
+    let summary_json = build_bundle_manifest(
+        flat_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("bundle"),
+        trader,
+        dataset,
+        rows,
+    )?;
+    fs::write(flat_dir.join("manifest.json"), summary_json)
+        .with_context(|| format!("failed to write manifest.json in {}", flat_dir.display()))?;
+
+    let has_combined_logs = outputs.iter().any(|output| {
+        output
+            .artifacts
+            .as_ref()
+            .is_some_and(|artifacts| !artifacts.combined_log.is_empty())
+    });
+    if has_combined_logs {
+        let combined_log = merge_combined_logs(rows, outputs);
+        fs::write(flat_dir.join("combined.log"), combined_log)
+            .with_context(|| format!("failed to write combined.log in {}", flat_dir.display()))?;
+    }
+
+    Ok(())
 }
 
 fn print_product_table(rows: &[SummaryRow], mode: ProductDisplayMode) {
@@ -952,14 +1095,18 @@ fn write_combined_bundle(
     let bundle_dir = output_root.join(run_id_seed);
     fs::create_dir_all(&bundle_dir)
         .with_context(|| format!("failed to create bundle directory {}", bundle_dir.display()))?;
-
-    let submission_log = merge_submission_logs(run_id_seed, outputs)?;
-    fs::write(bundle_dir.join("submission.log"), submission_log).with_context(|| {
-        format!(
-            "failed to write combined submission.log in {}",
-            bundle_dir.display()
-        )
-    })?;
+    for stale_name in ["submission.log", "merged_submission.log"] {
+        let stale_path = bundle_dir.join(stale_name);
+        if stale_path.is_file() {
+            fs::remove_file(&stale_path).with_context(|| {
+                format!(
+                    "failed to remove stale combined replay artifact {} in {}",
+                    stale_name,
+                    bundle_dir.display()
+                )
+            })?;
+        }
+    }
 
     let combined_log = merge_combined_logs(rows, outputs);
     fs::write(bundle_dir.join("combined.log"), combined_log)
@@ -972,6 +1119,7 @@ fn write_combined_bundle(
     Ok(display_path(&bundle_dir))
 }
 
+#[cfg(test)]
 fn merge_submission_logs(run_id: &str, outputs: &[crate::model::RunOutput]) -> Result<Vec<u8>> {
     let mut header: Option<String> = None;
     let mut activity_lines = Vec::new();
@@ -1325,7 +1473,16 @@ mod tests {
             std::path::Path::new("datasets/tutorial/prices_round_0_day_-2.csv"),
             Some(-2),
         );
-        assert_eq!(suffix, "day-2-day-2");
+        assert_eq!(suffix, "tutorial-day-2");
+    }
+
+    #[test]
+    fn run_suffix_includes_round_for_submission_logs() {
+        let suffix = run_suffix(
+            std::path::Path::new("datasets/round3/submission.log"),
+            Some(-1),
+        );
+        assert_eq!(suffix, "round3-submission-day-1");
     }
 
     #[test]

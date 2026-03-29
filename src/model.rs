@@ -7,6 +7,12 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone)]
+struct SubmissionTradeHistoryRow {
+    day: Option<i64>,
+    trade: MarketTrade,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedDataset {
     pub schema_version: String,
@@ -305,7 +311,10 @@ fn load_price_csv_dataset(path: &Path) -> Result<NormalizedDataset> {
         .filter(|trade_path| trade_path.is_file())
         .map(|trade_path| load_trades_csv(&trade_path))
         .transpose()?
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|trade| SubmissionTradeHistoryRow { day: None, trade })
+        .collect::<Vec<_>>();
 
     let mut metadata = IndexMap::new();
     metadata.insert(
@@ -332,7 +341,7 @@ fn build_dataset_from_activities(
     dataset_id: String,
     source: String,
     activities_log: &str,
-    trade_history: Vec<MarketTrade>,
+    trade_history: Vec<SubmissionTradeHistoryRow>,
     metadata: IndexMap<String, Value>,
 ) -> Result<NormalizedDataset> {
     let mut products_seen: IndexMap<String, ()> = IndexMap::new();
@@ -397,20 +406,23 @@ fn build_dataset_from_activities(
         bail!("no tick rows found in {}", path.display());
     }
 
-    let mut trades_by_timestamp: BTreeMap<i64, IndexMap<String, Vec<MarketTrade>>> =
+    let mut trades_by_key: BTreeMap<(Option<i64>, i64), IndexMap<String, Vec<MarketTrade>>> =
         BTreeMap::new();
     for trade in trade_history {
-        trades_by_timestamp
-            .entry(trade.timestamp)
+        trades_by_key
+            .entry((trade.day, trade.trade.timestamp))
             .or_default()
-            .entry(trade.symbol.clone())
+            .entry(trade.trade.symbol.clone())
             .or_default()
-            .push(trade);
+            .push(trade.trade);
     }
 
     let mut ticks: Vec<TickSnapshot> = ticks_by_key.into_values().collect();
     for tick in &mut ticks {
-        if let Some(market_trades) = trades_by_timestamp.remove(&tick.timestamp) {
+        if let Some(market_trades) = trades_by_key
+            .remove(&(tick.day, tick.timestamp))
+            .or_else(|| trades_by_key.remove(&(None, tick.timestamp)))
+        {
             tick.market_trades = market_trades;
         }
     }
@@ -462,37 +474,40 @@ fn parse_book_side(fields: &[&str], pairs: &[(usize, usize)]) -> Result<Vec<Orde
     Ok(levels)
 }
 
-fn parse_submission_trade_history(rows: &[Value]) -> Result<Vec<MarketTrade>> {
+fn parse_submission_trade_history(rows: &[Value]) -> Result<Vec<SubmissionTradeHistoryRow>> {
     rows.iter()
         .map(|row| {
             let object = row
                 .as_object()
                 .context("tradeHistory rows should be JSON objects")?;
-            Ok(MarketTrade {
-                symbol: object
-                    .get("symbol")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                price: parse_trade_value_price(object.get("price"))?,
-                quantity: object
-                    .get("quantity")
-                    .and_then(Value::as_i64)
-                    .context("tradeHistory row missing quantity")?,
-                buyer: object
-                    .get("buyer")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                seller: object
-                    .get("seller")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                timestamp: object
-                    .get("timestamp")
-                    .and_then(Value::as_i64)
-                    .context("tradeHistory row missing timestamp")?,
+            Ok(SubmissionTradeHistoryRow {
+                day: object.get("day").and_then(Value::as_i64),
+                trade: MarketTrade {
+                    symbol: object
+                        .get("symbol")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    price: parse_trade_value_price(object.get("price"))?,
+                    quantity: object
+                        .get("quantity")
+                        .and_then(Value::as_i64)
+                        .context("tradeHistory row missing quantity")?,
+                    buyer: object
+                        .get("buyer")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    seller: object
+                        .get("seller")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    timestamp: object
+                        .get("timestamp")
+                        .and_then(Value::as_i64)
+                        .context("tradeHistory row missing timestamp")?,
+                },
             })
         })
         .collect()
@@ -610,4 +625,53 @@ fn submission_dataset_id_from_path(path: &Path) -> String {
 
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_submission_value_dataset;
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn submission_trade_history_uses_day_when_present() {
+        let payload = json!({
+            "activitiesLog": concat!(
+                "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;ask_price_3;ask_volume_3;mid_price;profit_and_loss\n",
+                "-2;0;EMERALDS;9992;15;9990;30;;;10008;15;10010;30;;;10000.0;0.0\n",
+                "-1;0;EMERALDS;9992;15;9990;30;;;10008;15;10010;30;;;10000.0;0.0"
+            ),
+            "tradeHistory": [
+                {
+                    "day": -2,
+                    "timestamp": 0,
+                    "buyer": "A",
+                    "seller": "B",
+                    "symbol": "EMERALDS",
+                    "currency": "SEASHELLS",
+                    "price": 10000,
+                    "quantity": 1
+                },
+                {
+                    "day": -1,
+                    "timestamp": 0,
+                    "buyer": "C",
+                    "seller": "D",
+                    "symbol": "EMERALDS",
+                    "currency": "SEASHELLS",
+                    "price": 10001,
+                    "quantity": 2
+                }
+            ]
+        });
+
+        let dataset = load_submission_value_dataset(Path::new("combined.log"), &payload)
+            .expect("submission payload should load");
+
+        assert_eq!(dataset.ticks.len(), 2);
+        assert_eq!(dataset.ticks[0].day, Some(-2));
+        assert_eq!(dataset.ticks[1].day, Some(-1));
+        assert_eq!(dataset.ticks[0].market_trades["EMERALDS"][0].quantity, 1);
+        assert_eq!(dataset.ticks[1].market_trades["EMERALDS"][0].quantity, 2);
+    }
 }

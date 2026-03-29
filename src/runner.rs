@@ -245,12 +245,12 @@ pub fn run_backtest(request: &RunRequest) -> Result<RunOutput> {
 
             if need_submission_log {
                 for trade in &original_market {
-                    combined_trade_history.push(trade_history_json(trade));
+                    combined_trade_history.push(trade_history_json(trade, tick.day));
                 }
                 for trade in &symbol_own_trades {
-                    combined_trade_history.push(trade_history_json(trade));
+                    combined_trade_history.push(trade_history_json(trade, tick.day));
                     if full_artifacts {
-                        own_trade_rows.push(trade_history_json(trade));
+                        own_trade_rows.push(trade_history_json(trade, tick.day));
                     }
                 }
             }
@@ -290,6 +290,7 @@ pub fn run_backtest(request: &RunRequest) -> Result<RunOutput> {
 
         if need_submission_log {
             sandbox_rows.push(object(vec![
+                ("day", tick.day.map(json_i64).unwrap_or(Value::Null)),
                 ("timestamp", json_i64(tick.timestamp)),
                 ("sandboxLog", Value::String(sandbox_log.clone())),
                 ("lambdaLog", Value::String(algorithm_logs.clone())),
@@ -437,6 +438,8 @@ pub fn run_backtest(request: &RunRequest) -> Result<RunOutput> {
             write_artifacts(&run_dir, &artifact_set)?;
         } else if request.write_bundle && request.write_metrics {
             write_metrics_and_bundle(&run_dir, &artifact_set)?;
+        } else if request.write_submission_log && request.write_metrics {
+            write_metrics_and_submission_log(&run_dir, &artifact_set)?;
         } else if request.write_bundle {
             write_bundle_only(&run_dir, &artifact_set)?;
         } else if request.write_metrics {
@@ -1179,6 +1182,12 @@ fn write_metrics_and_bundle(run_dir: &Path, artifacts: &ArtifactSet) -> Result<(
     Ok(())
 }
 
+fn write_metrics_and_submission_log(run_dir: &Path, artifacts: &ArtifactSet) -> Result<()> {
+    fs::write(run_dir.join("metrics.json"), &artifacts.metrics_json)?;
+    fs::write(run_dir.join("submission.log"), &artifacts.submission_log)?;
+    Ok(())
+}
+
 fn write_metrics_only(run_dir: &Path, artifacts: &ArtifactSet) -> Result<()> {
     fs::write(run_dir.join("metrics.json"), &artifacts.metrics_json)?;
     Ok(())
@@ -1225,8 +1234,9 @@ fn trade_json(trade: &Trade) -> Value {
     ])
 }
 
-fn trade_history_json(trade: &Trade) -> Value {
+fn trade_history_json(trade: &Trade, day: Option<i64>) -> Value {
     object(vec![
+        ("day", day.map(json_i64).unwrap_or(Value::Null)),
         ("timestamp", json_i64(trade.timestamp)),
         ("buyer", Value::String(trade.buyer.clone())),
         ("seller", Value::String(trade.seller.clone())),
@@ -1257,12 +1267,13 @@ fn indexmap_f64_to_json(values: &IndexMap<String, f64>) -> Result<IndexMap<Strin
 mod tests {
     use super::{
         BookLevel, display_path, eligible_trade_price, enforce_position_limits,
-        market_trade_duplicates_touch, match_orders_for_symbol, project_root,
+        market_trade_duplicates_touch, match_orders_for_symbol, project_root, run_backtest,
         python_round_to_digits, python_round_to_i64, queue_penetration_available,
         slippage_adjusted_price,
     };
-    use crate::model::{MarketTrade, MatchingConfig, Order};
+    use crate::model::{MarketTrade, MatchingConfig, Order, RunRequest};
     use indexmap::IndexMap;
+    use std::fs;
 
     #[test]
     fn queue_penetration_uses_bankers_rounding() {
@@ -1439,6 +1450,39 @@ mod tests {
         assert!(messages[0].contains("80"));
         assert!(messages[1].contains("TOMATOES"));
         assert!(messages[1].contains("80"));
+    }
+
+    #[test]
+    fn log_only_mode_writes_submission_log_and_metrics() {
+        let unique = format!(
+            "runner-log-only-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        );
+        let output_root = std::env::temp_dir().join(unique);
+        let request = RunRequest {
+            trader_file: project_root().join("traders/latest_trader.py"),
+            dataset_file: project_root().join("datasets/tutorial/prices_round_0_day_-1.csv"),
+            day: Some(-1),
+            matching: MatchingConfig::default(),
+            run_id: Some("log-only-check".to_string()),
+            output_root: output_root.clone(),
+            persist: false,
+            write_metrics: true,
+            write_bundle: false,
+            write_submission_log: true,
+            materialize_artifacts: false,
+            metadata_overrides: Default::default(),
+        };
+
+        let output = run_backtest(&request).expect("backtest should succeed");
+
+        assert!(output.run_dir.join("metrics.json").is_file());
+        assert!(output.run_dir.join("submission.log").is_file());
+
+        fs::remove_dir_all(output_root).expect("temp output root should be cleaned up");
     }
 
     #[test]

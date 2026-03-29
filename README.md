@@ -125,6 +125,7 @@ make tutorial DAY=-1
 make submission ROUND=round1
 make round3 TRADER=traders/latest_trader.py
 make round2 PERSIST=1
+make tutorial FLAT=1
 ```
 
 Supported input formats:
@@ -177,8 +178,10 @@ Behavior:
 - `metrics.json` is always written under `runs/<backtest-id>/`
 - default fast runs also write `submission.log` under `runs/<backtest-id>/`
 - use `--artifact-mode` to choose which extra artifacts are written
+- use `--flat` or `FLAT=1` to place multi-run outputs in a single directory with dataset/day-prefixed filenames
 - use `--persist` or `PERSIST=1` to write the full replay artifact set under `runs/`
-- persisted multi-day or multi-file runs also write one combined bundle at `runs/<backtest-id>/`, including a merged `submission.log`
+- persisted multi-day or multi-file runs also write one combined bundle at `runs/<backtest-id>/`, including `combined.log` and `manifest.json`
+- for multi-run visualizer uploads, use each child `RUN_DIR/submission.log`; the top-level bundle does not emit a stitched replay file
 - product output defaults to a compact summary so large product sets do not flood the terminal
 
 Bundled dataset aliases:
@@ -209,6 +212,12 @@ Artifact modes:
 - `--artifact-mode diagnostic`: write `metrics.json` and `bundle.json` with the PnL series included for diagnostics
 - `--artifact-mode full`: write the full persisted artifact set: `metrics.json`, `bundle.json`, `submission.log`, `activity.csv`, `pnl_by_product.csv`, `combined.log`, and `trades.csv`
 - `--persist` implies `--artifact-mode full` unless you explicitly override `--artifact-mode`
+
+Flat layout behavior:
+
+- `--flat` only changes multi-run layouts; single-run outputs stay unchanged
+- multi-run outputs are written into `runs/<backtest-id>/` with prefixed filenames such as `tutorial-day-2-submission.log` and `tutorial-day-2-metrics.json`
+- when `--flat` is combined with `--persist`, the same directory also includes `combined.log` and `manifest.json`
 
 Artifact mode examples:
 
@@ -314,7 +323,7 @@ The Docker image builds the project in a clean container and runs the zero-argum
 - `datasets/tutorial/` bundled raw IMC tutorial day CSVs and sample submission log
 - `datasets/round1/` ... `datasets/round8/` placeholders for future round data
 - `runs/` persisted outputs when `--persist` is used
-- `runs/<backtest-id>/` combined bundle for persisted multi-day runs, including merged `submission.log`, merged `combined.log`, and `manifest.json`
+- `runs/<backtest-id>/` combined bundle for persisted multi-day runs, including `combined.log` and `manifest.json`
 
 ## Licensing
 
