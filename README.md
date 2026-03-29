@@ -174,8 +174,10 @@ Behavior:
 - `prices_*.csv` files are paired automatically with matching `trades_*.csv` files from the same folder
 - `latest` and `tutorial` run the full bundled tutorial round bundle: day `-2`, day `-1`, and the sample tutorial submission log
 - use `--day <n>` to run only the matching day dataset within the round bundle; this excludes submission files
-- normal fast runs also write `submission.log` under `runs/<backtest-id>/`
-- use `--persist` or `PERSIST=1` to write replay artifacts under `runs/`
+- `metrics.json` is always written under `runs/<backtest-id>/`
+- default fast runs also write `submission.log` under `runs/<backtest-id>/`
+- use `--artifact-mode` to choose which extra artifacts are written
+- use `--persist` or `PERSIST=1` to write the full replay artifact set under `runs/`
 - persisted multi-day or multi-file runs also write one combined bundle at `runs/<backtest-id>/`, including a merged `submission.log`
 - product output defaults to a compact summary so large product sets do not flood the terminal
 
@@ -199,6 +201,37 @@ Product display modes:
 - `--products summary` default: print a separate product table with the top product PnL contributors and an `OTHER(+N)` rollup when needed
 - `--products full`: print a separate product table with every product
 - `--products off`: show only the per-day total
+
+Artifact modes:
+
+- `--artifact-mode none`: write only `metrics.json`
+- `--artifact-mode submission` default when `--persist` is not set: write `metrics.json` and `submission.log`
+- `--artifact-mode diagnostic`: write `metrics.json` and `bundle.json` with the PnL series included for diagnostics
+- `--artifact-mode full`: write the full persisted artifact set: `metrics.json`, `bundle.json`, `submission.log`, `activity.csv`, `pnl_by_product.csv`, `combined.log`, and `trades.csv`
+- `--persist` implies `--artifact-mode full` unless you explicitly override `--artifact-mode`
+
+Artifact mode examples:
+
+```bash
+rust_backtester \
+  --trader /path/to/trader.py \
+  --dataset tutorial \
+  --artifact-mode none
+```
+
+```bash
+rust_backtester \
+  --trader /path/to/trader.py \
+  --dataset tutorial \
+  --artifact-mode diagnostic
+```
+
+```bash
+rust_backtester \
+  --trader /path/to/trader.py \
+  --dataset tutorial \
+  --artifact-mode full
+```
 
 Example output shape:
 
