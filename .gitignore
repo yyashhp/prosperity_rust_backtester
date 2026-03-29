@@ -10,3 +10,4 @@ dist/
 .DS_Store
 TUTORIAL_ROUND_*/
 [0-9]*/
+traders/p4*

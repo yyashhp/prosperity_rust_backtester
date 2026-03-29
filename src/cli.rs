@@ -9,7 +9,9 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::jsonfmt::{object, pretty_json_bytes};
-use crate::model::{MatchingConfig, RunRequest, load_dataset};
+use crate::model::{
+    MatchingConfig, RunRequest, load_dataset, materialize_submission_json_if_missing,
+};
 use crate::runner::{default_output_root, display_path, project_root, run_backtest};
 
 #[derive(Debug, Parser)]
@@ -277,6 +279,9 @@ fn collect_dataset_files(dataset_root: &Path) -> Result<Vec<PathBuf>> {
         if dataset_candidate_key(dataset_root).is_none() {
             bail!("unsupported dataset file {}", display_path(dataset_root));
         }
+        if let Some(preferred_path) = ensure_submission_json_materialized(dataset_root)? {
+            return Ok(vec![preferred_path]);
+        }
         return Ok(vec![dataset_root.to_path_buf()]);
     }
     if !dataset_root.is_dir() {
@@ -284,6 +289,20 @@ fn collect_dataset_files(dataset_root: &Path) -> Result<Vec<PathBuf>> {
             "dataset path is not a file or directory: {}",
             dataset_root.display()
         );
+    }
+
+    for entry in fs::read_dir(dataset_root).with_context(|| {
+        format!(
+            "failed to read dataset directory {}",
+            dataset_root.display()
+        )
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let _ = ensure_submission_json_materialized(&path)?;
     }
 
     let mut selected: IndexMap<String, (u8, PathBuf)> = IndexMap::new();
@@ -638,7 +657,7 @@ fn round_day_entry(round_root: &Path, day: i64) -> Result<PathBuf> {
 fn round_submission_entry(round_root: &Path) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = collect_dataset_files(round_root)?
         .into_iter()
-        .filter(|path| !is_day_dataset_path(path))
+        .filter(|path| is_submission_candidate_path(path))
         .collect();
     candidates.sort_by(|left, right| {
         submission_candidate_rank(right)
@@ -657,6 +676,9 @@ fn dataset_candidate_key(path: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
     }
+    if is_submission_candidate_path(path) {
+        return Some("submission".to_string());
+    }
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
     if is_trades_csv_name(&name) {
         return None;
@@ -668,7 +690,8 @@ fn dataset_candidate_key(path: &Path) -> Option<String> {
         });
     }
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some("log") | Some("json") => path
+        Some("log") => None,
+        Some("json") => path
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string()),
         _ => None,
@@ -676,6 +699,9 @@ fn dataset_candidate_key(path: &Path) -> Option<String> {
 }
 
 fn dataset_candidate_rank(path: &Path) -> u8 {
+    if is_submission_candidate_path(path) {
+        return submission_candidate_rank(path);
+    }
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -728,13 +754,42 @@ fn is_day_dataset_path(path: &Path) -> bool {
     day_key_from_path(path).is_some()
 }
 
+fn is_submission_candidate_path(path: &Path) -> bool {
+    is_submission_like_path(path) && !is_day_dataset_path(path)
+}
+
 fn is_submission_like_path(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    name.ends_with(".log") || name.contains("submission")
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "log" => is_submission_stem(&stem),
+        "json" => {
+            is_submission_stem(&stem)
+                || path.with_extension("log").is_file()
+                    && is_submission_stem(
+                        &path
+                            .with_extension("log")
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase(),
+                    )
+        }
+        _ => false,
+    }
+}
+
+fn is_submission_stem(stem: &str) -> bool {
+    stem.contains("submission") || (!stem.is_empty() && stem.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn submission_candidate_rank(path: &Path) -> u8 {
@@ -744,11 +799,38 @@ fn submission_candidate_rank(path: &Path) -> u8 {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match name.as_str() {
-        "submission.log" => 4,
-        "submission.json" => 3,
-        _ if name.ends_with(".log") => 2,
+        "submission.json" => 4,
+        _ if name.ends_with(".json") => 3,
+        "submission.log" => 2,
+        _ if name.ends_with(".log") => 1,
         _ => 1,
     }
+}
+
+fn ensure_submission_json_materialized(path: &Path) -> Result<Option<PathBuf>> {
+    if let Some(json_path) = materialize_submission_json_if_missing(path)? {
+        println!(
+            "generated normalized submission dataset: {} (from {})",
+            display_path(&json_path),
+            display_path(path)
+        );
+        return Ok(Some(json_path));
+    }
+
+    if is_submission_candidate_path(path)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .eq_ignore_ascii_case("log")
+    {
+        let json_path = path.with_extension("json");
+        if json_path.is_file() {
+            return Ok(Some(json_path));
+        }
+    }
+
+    Ok(None)
 }
 
 fn is_prices_csv_name(name: &str) -> bool {
@@ -1117,8 +1199,9 @@ fn short_product_label(product: &str) -> &'static str {
 mod tests {
     use super::{
         ProductDisplayMode, ProductMatrix, ProductMatrixRow, SummaryRow, build_product_matrix,
-        collect_requested_days, merge_submission_logs, resolve_dataset_input,
-        resolve_dataset_input_with_root, run_suffix, short_dataset_label,
+        collect_dataset_files, collect_requested_days, merge_submission_logs,
+        resolve_dataset_input, resolve_dataset_input_with_root, round_submission_entry, run_suffix,
+        short_dataset_label,
     };
     use crate::model::{ArtifactSet, MatchingConfig, RunMetrics, RunOutput, load_dataset};
     use crate::runner::project_root;
@@ -1293,6 +1376,111 @@ mod tests {
     fn short_label_uses_known_aliases() {
         let label = short_dataset_label(std::path::Path::new("submission.json"));
         assert_eq!(label, "SUB");
+    }
+
+    #[test]
+    fn collect_dataset_files_materializes_submission_json_from_log() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let round_root = std::env::temp_dir().join(format!(
+            "rust_backtester_submission_selection_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&round_root).expect("round root should exist");
+        fs::write(round_root.join("511.log"), sample_submission_log())
+            .expect("sample submission log should be written");
+
+        let files = collect_dataset_files(&round_root).expect("dataset files should be collected");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|value| value.to_str()),
+            Some("511.json")
+        );
+        assert!(round_root.join("511.json").is_file());
+        let generated: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(round_root.join("511.json"))
+                .expect("generated submission json should be readable"),
+        )
+        .expect("generated submission json should parse");
+        assert_eq!(
+            generated
+                .get("dataset_id")
+                .and_then(serde_json::Value::as_str),
+            Some("official_submission_511_alltrades")
+        );
+
+        let _ = fs::remove_dir_all(round_root);
+    }
+
+    #[test]
+    fn collect_dataset_files_ignores_unrelated_log_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let round_root = std::env::temp_dir().join(format!(
+            "rust_backtester_submission_ignore_log_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&round_root).expect("round root should exist");
+        fs::write(
+            round_root.join("prices_round_0_day_-1.csv"),
+            "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;ask_price_3;ask_volume_3;mid_price;profit_and_loss\n-1;0;EMERALDS;9992;15;9990;30;;;10008;15;10010;30;;;10000.0;0.0\n",
+        )
+        .expect("sample prices csv should be written");
+        fs::write(round_root.join("combined.log"), "not a submission payload")
+            .expect("unrelated log should be written");
+
+        let files = collect_dataset_files(&round_root).expect("dataset files should be collected");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|value| value.to_str()),
+            Some("prices_round_0_day_-1.csv")
+        );
+        assert!(!round_root.join("combined.json").is_file());
+
+        let _ = fs::remove_dir_all(round_root);
+    }
+
+    #[test]
+    fn round_submission_entry_uses_generated_submission_json() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let round_root = std::env::temp_dir().join(format!(
+            "rust_backtester_submission_entry_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&round_root).expect("round root should exist");
+        fs::write(round_root.join("submission.log"), sample_submission_log())
+            .expect("sample submission log should be written");
+
+        let selected =
+            round_submission_entry(&round_root).expect("submission entry should resolve");
+
+        assert_eq!(
+            selected.file_name().and_then(|value| value.to_str()),
+            Some("submission.json")
+        );
+        assert!(round_root.join("submission.json").is_file());
+
+        let _ = fs::remove_dir_all(round_root);
+    }
+
+    fn sample_submission_log() -> &'static str {
+        r#"{
+  "submissionId": "sample-submission",
+  "activitiesLog": "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;ask_price_3;ask_volume_3;mid_price;profit_and_loss\n-1;0;EMERALDS;9992;15;9990;30;;;10008;15;10010;30;;;10000.0;0.0\n-1;0;TOMATOES;4999;6;4998;19;;;5013;6;5014;19;;;5006.0;0.0",
+  "tradeHistory": []
+}"#
     }
 
     #[test]

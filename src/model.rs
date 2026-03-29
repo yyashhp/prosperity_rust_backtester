@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedDataset {
     pub schema_version: String,
     pub competition_version: String,
@@ -19,7 +19,7 @@ pub struct NormalizedDataset {
     pub ticks: Vec<TickSnapshot>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TickSnapshot {
     pub timestamp: i64,
     pub day: Option<i64>,
@@ -30,7 +30,7 @@ pub struct TickSnapshot {
     pub observations: ObservationState,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductSnapshot {
     pub product: String,
     #[serde(default)]
@@ -40,13 +40,13 @@ pub struct ProductSnapshot {
     pub mid_price: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBookLevel {
     pub price: i64,
     pub volume: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketTrade {
     pub symbol: String,
     pub price: i64,
@@ -59,7 +59,7 @@ pub struct MarketTrade {
     pub timestamp: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObservationState {
     #[serde(default)]
     pub plain: IndexMap<String, i64>,
@@ -184,6 +184,41 @@ pub fn load_dataset(path: &Path) -> Result<NormalizedDataset> {
     }
 }
 
+pub fn materialize_submission_json_if_missing(path: &Path) -> Result<Option<PathBuf>> {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        != "log"
+    {
+        return Ok(None);
+    }
+
+    let json_path = path.with_extension("json");
+    if json_path.is_file() {
+        return Ok(None);
+    }
+
+    let Some(value) = read_submission_log_payload(path)? else {
+        return Ok(None);
+    };
+    let dataset = load_submission_value_dataset(path, &value)?;
+    let payload = serde_json::to_vec_pretty(&dataset).with_context(|| {
+        format!(
+            "failed to serialize normalized submission dataset for {}",
+            path.display()
+        )
+    })?;
+    fs::write(&json_path, payload).with_context(|| {
+        format!(
+            "failed to write normalized submission dataset {}",
+            json_path.display()
+        )
+    })?;
+    Ok(Some(json_path))
+}
+
 const ACTIVITY_HEADER_PREFIX: &str =
     "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2";
 const TRADE_HEADER_PREFIX: &str = "timestamp;buyer;seller;symbol;currency;price;quantity";
@@ -205,11 +240,21 @@ fn load_json_dataset(path: &Path) -> Result<NormalizedDataset> {
 }
 
 fn load_submission_log_dataset(path: &Path) -> Result<NormalizedDataset> {
-    let payload = fs::read_to_string(path)
-        .with_context(|| format!("failed to read submission log {}", path.display()))?;
-    let value: Value = serde_json::from_str(&payload)
+    let value = read_submission_log_payload(path)?
         .with_context(|| format!("failed to parse submission log JSON {}", path.display()))?;
     load_submission_value_dataset(path, &value)
+}
+
+fn read_submission_log_payload(path: &Path) -> Result<Option<Value>> {
+    let payload = fs::read_to_string(path)
+        .with_context(|| format!("failed to read log {}", path.display()))?;
+    let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+        return Ok(None);
+    };
+    if value.get("activitiesLog").and_then(Value::as_str).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(value))
 }
 
 fn load_submission_value_dataset(path: &Path, value: &Value) -> Result<NormalizedDataset> {
@@ -230,30 +275,12 @@ fn load_submission_value_dataset(path: &Path, value: &Value) -> Result<Normalize
         .unwrap_or_default();
 
     let mut metadata = IndexMap::new();
-    metadata.insert(
-        "source_format".to_string(),
-        Value::String("imc_submission_log".to_string()),
-    );
-    if let Some(submission_id) = value.get("submissionId").cloned() {
-        metadata.insert("submission_id".to_string(), submission_id);
-    }
-    for key in ["round", "status", "profit"] {
-        if let Some(entry) = value.get(key).cloned() {
-            metadata.insert(key.to_string(), entry);
-        }
-    }
-    metadata.insert(
-        "trade_rows".to_string(),
-        Value::Number((trade_history.len() as u64).into()),
-    );
+    metadata.insert("built_from".to_string(), Value::String(path_string(path)));
 
     build_dataset_from_activities(
         path,
-        dataset_id_from_path(path),
-        format!(
-            "imc_submission:{}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ),
+        submission_dataset_id_from_path(path),
+        path_string(path),
         activities_log,
         trade_history,
         metadata,
@@ -310,6 +337,8 @@ fn build_dataset_from_activities(
 ) -> Result<NormalizedDataset> {
     let mut products_seen: IndexMap<String, ()> = IndexMap::new();
     let mut ticks_by_key: BTreeMap<(Option<i64>, i64), TickSnapshot> = BTreeMap::new();
+    let mut activity_row_count = 0u64;
+    let trade_row_count = trade_history.len() as u64;
 
     for (line_number, line) in activities_log.lines().enumerate() {
         if line_number == 0 {
@@ -349,6 +378,7 @@ fn build_dataset_from_activities(
             mid_price: parse_optional_f64(fields[15])?,
         };
 
+        activity_row_count += 1;
         products_seen.entry(product.to_string()).or_insert(());
         ticks_by_key
             .entry((day, timestamp))
@@ -385,13 +415,29 @@ fn build_dataset_from_activities(
         }
     }
 
+    let mut products: Vec<String> = products_seen.into_keys().collect();
+    products.sort();
+
+    let mut full_metadata = IndexMap::new();
+    full_metadata.insert(
+        "activity_rows".to_string(),
+        Value::Number(activity_row_count.into()),
+    );
+    full_metadata.extend(metadata);
+    if !full_metadata.contains_key("trade_rows") {
+        full_metadata.insert(
+            "trade_rows".to_string(),
+            Value::Number(trade_row_count.into()),
+        );
+    }
+
     Ok(NormalizedDataset {
         schema_version: "1.0".to_string(),
         competition_version: "p4".to_string(),
         dataset_id,
         source,
-        products: products_seen.into_keys().collect(),
-        metadata,
+        products,
+        metadata: full_metadata,
         ticks,
     })
 }
@@ -552,4 +598,16 @@ fn dataset_id_from_path(path: &Path) -> String {
         .and_then(|stem| stem.to_str())
         .unwrap_or("dataset")
         .to_string()
+}
+
+fn submission_dataset_id_from_path(path: &Path) -> String {
+    let stem = dataset_id_from_path(path);
+    if !stem.is_empty() && stem.chars().all(|ch| ch.is_ascii_digit()) {
+        return format!("official_submission_{stem}_alltrades");
+    }
+    stem
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
