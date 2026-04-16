@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0 - 2026-04-16
+
+### Changed
+
+- Improve multi-run CLI output with a `TOTAL` row in the top summary table and a rightmost `TOTAL` column in the product table.
+- Standardize day labels in CLI summaries to use `D-2`, `D-1`, `D=0`, and `D+N` formatting.
+- Add regression tests for the new CLI summary label and total-column behavior.
+
 ## v0.2.2 - 2026-04-14
 
 ### Added
