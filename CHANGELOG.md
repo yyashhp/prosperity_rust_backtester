@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.2 - 2026-04-19
+
+### Changed
+
+- Clarify the README install instructions so end users can prefer the published crates.io binary via `cargo install rust_backtester --locked`.
+- Document how to run the installed binary, how to update it, and how it differs from local development flows like `cargo run` and `cargo run --release`.
+
 ## v0.4.1 - 2026-04-18
 
 ### Added

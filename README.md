@@ -28,16 +28,37 @@ source "$HOME/.cargo/env"
 python3 --version
 ```
 
-Then either install the CLI:
+For normal end-user usage, install the published CLI from crates.io:
+
+```bash
+cargo install rust_backtester --locked
+```
+
+Then run it directly:
+
+```bash
+rust_backtester --help
+rust_backtester
+```
+
+If `rust_backtester` is not found after install, make sure `~/.cargo/bin` is on your `PATH`.
+
+For local development from this repo, either install the local CLI:
 
 ```bash
 make install
 ```
 
-or just run the backtester directly:
+or run the backtester directly from source:
 
 ```bash
 make backtest
+```
+
+For the fastest local-source runs, prefer:
+
+```bash
+cargo run --release -- --help
 ```
 
 The macOS `make` targets intentionally build through a wrapper instead of your full shell environment. By default they write Rust build artifacts to:
@@ -59,6 +80,7 @@ Use WSL2. Open an Ubuntu shell inside WSL2 and run the same commands there. Nati
 There is no separate manual build step required for normal use:
 
 - `make backtest` and the other `make` run targets use `cargo run`, which builds automatically on first use
+- `cargo install rust_backtester --locked` installs the published release binary so you can run `rust_backtester` directly afterward
 - `make install` installs the CLI once so you can run `rust_backtester` directly afterward
 - `make doctor` prints local diagnostics for macOS build hangs and execution-policy issues
 
@@ -118,6 +140,19 @@ or:
 
 ```bash
 rust_backtester
+```
+
+For the published crates.io binary, the normal flow is:
+
+```bash
+cargo install rust_backtester --locked
+rust_backtester
+```
+
+To update later:
+
+```bash
+cargo install rust_backtester --locked
 ```
 
 Round-specific shortcuts:
@@ -195,6 +230,13 @@ Behavior:
 - persisted multi-day or multi-file runs also write one combined bundle at `runs/<backtest-id>/`, including `combined.log` and `manifest.json`
 - for multi-run visualizer uploads, use each child `RUN_DIR/submission.log`; the top-level bundle does not emit a stitched replay file
 - product output defaults to a compact summary so large product sets do not flood the terminal
+
+Published binary vs local development:
+
+- `rust_backtester` runs the installed binary found on your `PATH`, typically `~/.cargo/bin/rust_backtester`
+- `cargo run -- ...` runs the local source tree in debug mode
+- `cargo run --release -- ...` runs the local source tree in release mode
+- if end users report slow runs, make sure they are running the installed `rust_backtester` binary and not repeatedly using `cargo run`
 
 Bundled dataset aliases:
 
