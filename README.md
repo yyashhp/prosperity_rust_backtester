@@ -28,16 +28,46 @@ source "$HOME/.cargo/env"
 python3 --version
 ```
 
-Then either install the CLI:
+For normal end-user usage, install the published CLI from crates.io:
+
+```bash
+cargo install rust_backtester --locked
+```
+
+Then run it directly:
+
+```bash
+rust_backtester --help
+rust_backtester
+```
+
+If `rust_backtester` is not found after install, make sure `~/.cargo/bin` is on your `PATH`.
+
+If `rust_backtester cannot be executed after install, make sure that `~/scripts/cargo_local.sh` is executable:
+```
+ls -la scripts/
+
+sed -i 's/\r$//' scripts/cargo_local.sh
+
+chmod +x scripts/cargo_local.sh
+```
+
+For local development from this repo, either install the local CLI:
 
 ```bash
 make install
 ```
 
-or just run the backtester directly:
+or run the backtester directly from source:
 
 ```bash
 make backtest
+```
+
+For the fastest local-source runs, prefer:
+
+```bash
+cargo run --release -- --help
 ```
 
 The macOS `make` targets intentionally build through a wrapper instead of your full shell environment. By default they write Rust build artifacts to:
@@ -59,6 +89,7 @@ Use WSL2. Open an Ubuntu shell inside WSL2 and run the same commands there. Nati
 There is no separate manual build step required for normal use:
 
 - `make backtest` and the other `make` run targets use `cargo run`, which builds automatically on first use
+- `cargo install rust_backtester --locked` installs the published release binary so you can run `rust_backtester` directly afterward
 - `make install` installs the CLI once so you can run `rust_backtester` directly afterward
 - `make doctor` prints local diagnostics for macOS build hangs and execution-policy issues
 
@@ -77,7 +108,12 @@ The repo is organized by round:
 - `datasets/round1/trades_round_1_day_-1.csv`
 - `datasets/round1/prices_round_1_day_0.csv`
 - `datasets/round1/trades_round_1_day_0.csv`
-- `datasets/round2/`
+- `datasets/round2/prices_round_2_day_-1.csv`
+- `datasets/round2/trades_round_2_day_-1.csv`
+- `datasets/round2/prices_round_2_day_0.csv`
+- `datasets/round2/trades_round_2_day_0.csv`
+- `datasets/round2/prices_round_2_day_1.csv`
+- `datasets/round2/trades_round_2_day_1.csv`
 - `datasets/round3/`
 - `datasets/round4/`
 - `datasets/round5/`
@@ -85,7 +121,7 @@ The repo is organized by round:
 - `datasets/round7/`
 - `datasets/round8/`
 
-Right now the bundled public data is the raw IMC tutorial day data in `datasets/tutorial/`, the raw round 1 day data in `datasets/round1/`, plus a sample tutorial `submission.log` produced with the bundled basic trader. The other round folders are there so future round files can be placed in the correct folder instead of being mixed together.
+Right now the bundled public data is the raw IMC tutorial day data in `datasets/tutorial/`, the raw round 1 day data in `datasets/round1/`, the raw round 2 day data in `datasets/round2/`, plus a sample tutorial `submission.log` produced with the bundled basic trader. The remaining round folders are there so future round files can be placed in the correct folder instead of being mixed together.
 If you place a portal `submission.log` file into a round folder, the backtester will use it. `submission.log` is also generated for persisted runs.
 
 ## CLI
@@ -113,6 +149,19 @@ or:
 
 ```bash
 rust_backtester
+```
+
+For the published crates.io binary, the normal flow is:
+
+```bash
+cargo install rust_backtester --locked
+rust_backtester
+```
+
+To update later:
+
+```bash
+cargo install rust_backtester --locked
 ```
 
 Round-specific shortcuts:
@@ -190,6 +239,13 @@ Behavior:
 - persisted multi-day or multi-file runs also write one combined bundle at `runs/<backtest-id>/`, including `combined.log` and `manifest.json`
 - for multi-run visualizer uploads, use each child `RUN_DIR/submission.log`; the top-level bundle does not emit a stitched replay file
 - product output defaults to a compact summary so large product sets do not flood the terminal
+
+Published binary vs local development:
+
+- `rust_backtester` runs the installed binary found on your `PATH`, typically `~/.cargo/bin/rust_backtester`
+- `cargo run -- ...` runs the local source tree in debug mode
+- `cargo run --release -- ...` runs the local source tree in release mode
+- if end users report slow runs, make sure they are running the installed `rust_backtester` binary and not repeatedly using `cargo run`
 
 Bundled dataset aliases:
 
@@ -337,7 +393,8 @@ The Docker image builds the project in a clean container and runs the zero-argum
 - `traders/latest_trader.py` bundled default trader
 - `datasets/tutorial/` bundled raw IMC tutorial day CSVs and sample submission log
 - `datasets/round1/` bundled raw IMC round 1 CSVs
-- `datasets/round2/` ... `datasets/round8/` placeholders for future round data
+- `datasets/round2/` bundled raw IMC round 2 CSVs
+- `datasets/round3/` ... `datasets/round8/` placeholders for future round data
 - `runs/` persisted outputs when `--persist` is used
 - `runs/<backtest-id>/` combined bundle for persisted multi-day runs, including `combined.log` and `manifest.json`
 
